@@ -92,6 +92,8 @@ class CommandProcessor:
             cmd = 'G28\r\n'
         elif '?' in cmd:
             cmd = 'M114\r\n'
+        elif 'G0' in cmd:
+            cmd = cmd + 'F4000'
 
         cmd = CommandProcessor.replace_math_expressions(cmd)
         return cmd
