@@ -1,6 +1,33 @@
 import argparse
 from PIL import Image
 
+import base64
+from io import BytesIO
+
+def add_gcode_thumbnail(image, gcode):
+    """
+    Add a G-code thumbnail to the G-code file for Klipper.
+
+    Args:
+        image (PIL.Image.Image): Image to generate the thumbnail.
+        gcode (list): G-code lines to append the thumbnail comment to.
+    """
+    thumbnail = image.copy()
+
+    # Save thumbnail to an in-memory buffer
+    buffer = BytesIO()
+    thumbnail.save(buffer, format="PNG")
+    buffer.seek(0)
+
+    # Encode the image in Base64
+    encoded_thumbnail = base64.b64encode(buffer.getvalue()).decode('ascii')
+    thumbnail_comment = f"; thumbnail begin {thumbnail.size[0]}, {thumbnail.size[1]}\n"
+    thumbnail_comment += f"; {encoded_thumbnail}\n"
+    thumbnail_comment += f"; thumbnail end"
+
+    # Insert the thumbnail comment at the top of the G-code
+    gcode.insert(0, thumbnail_comment)
+    
 def png_to_gcode(input_file, output_file, laser_max_power=255, feed_rate=1500, fast_return_rate=3000, lines_per_mm=10):
     """
     Convert a PNG file to G-code for laser engraving with unidirectional engraving.
@@ -26,38 +53,58 @@ def png_to_gcode(input_file, output_file, laser_max_power=255, feed_rate=1500, f
     new_height = int(height_mm * lines_per_mm)
 
     # Resize image
-    image = image.resize((new_width, new_height), Image.LANCZOS)
+    image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
     pixels = image.load()
+
+    # Save image as BMP for Klipper display
+    bmp_path = output_file.replace(".gcode", ".bmp")
+    image.save(bmp_path, format="BMP")
 
     # Initialize G-code
     gcode = [
         "G21 ; Set units to mm",
         "G90 ; Absolute positioning",
         "M5 ; Laser off",
-        f"G1 F{feed_rate} ; Set feed rate for engraving"
+        f"G1 F{feed_rate} ; Set feed rate for engraving",
     ]
+    
+    add_gcode_thumbnail(image, gcode)
 
     total_gcode_lines = 0  # Counter for statistics
 
     # Process the image row by row
     for y in range(new_height):
+        # Check if the entire row is empty (no laser power required)
+        if all(pixels[x, -y] == 255 for x in range(new_width)):
+            continue  # Skip empty rows
+
         gcode.append(f"; Row {y}")
-        row_gcode = []
+        x_start = None
+        current_power = None
 
         for x in range(new_width):
-            power = (1-pixels[x, -y] / 255) * laser_max_power
-            row_gcode.append(f"G1 X{round(x * pixel_size_mm, 3)} Y{round(y * pixel_size_mm, 3)} S{int(power)}")
+            power = int((1 - pixels[x, -y] / 255) * laser_max_power)
 
-        # Add G-code for engraving
-        gcode.append("M03 ; Laser on")  # Laser on for engraving
-        gcode.extend(row_gcode)
-        gcode.append("M5 ; Laser off")  # Laser off at the end of the row
+            if power != current_power:
+                if current_power is not None:
+                    # Finish the previous segment
+                    x_end = x - 1
+                    gcode.append(f"G1 X{round(x_end * pixel_size_mm, 3)} Y{round(y * pixel_size_mm, 3)} S{current_power}")
+                # Start a new segment
+                x_start = x
+                current_power = power
+
+        # Finish the last segment in the row
+        if current_power is not None:
+            x_end = new_width - 1
+            gcode.append(f"G1 X{round(x_end * pixel_size_mm, 3)} Y{round(y * pixel_size_mm, 3)} S{current_power}")
 
         # Add fast return
-        gcode.append(f"G1 X0 Y{round(y * pixel_size_mm, 3)} F{fast_return_rate} ; Fast return")
+        gcode.append("M5 ; Laser off")  # Laser off at the end of the row
+        gcode.append(f"G1 X0 Y{round((y + 1) * pixel_size_mm, 3)} F{fast_return_rate} ; Fast return")
         gcode.append(f"G1 F{feed_rate}")
 
-        total_gcode_lines += len(row_gcode) + 2  # Include M03 and M05
+        total_gcode_lines += 1
 
     # Finalize G-code
     gcode.append("G0 X0 Y0 ; Return to origin")
@@ -73,7 +120,6 @@ def png_to_gcode(input_file, output_file, laser_max_power=255, feed_rate=1500, f
     print(f"Image dimensions: {width_mm:.2f} mm x {height_mm:.2f} mm")
     print(f"Total G-code lines: {total_gcode_lines}")
 
-
 def main():
     parser = argparse.ArgumentParser(description="Convert PNG to G-code for laser engraving.")
     parser.add_argument("input_file", help="Path to the input PNG file.")
@@ -82,7 +128,7 @@ def main():
         "-p", "--power", type=int, default=255, help="Maximum laser power (default: 255)"
     )
     parser.add_argument(
-        "-f", "--feedrate", type=int, default=1200, help="Feed rate for engraving in mm/min (default: 1200)"
+        "-f", "--feedrate", type=int, default=1500, help="Feed rate for engraving in mm/min (default: 1200)"
     )
     parser.add_argument(
         "-r", "--fast_return_rate", type=int, default=3000, help="Feed rate for fast return in mm/min (default: 3000)"
@@ -101,7 +147,6 @@ def main():
         fast_return_rate=args.fast_return_rate,
         lines_per_mm=args.lines_per_mm,
     )
-
 
 if __name__ == "__main__":
     main()
